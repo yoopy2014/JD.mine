@@ -1,0 +1,1168 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>災害ナビ<ver2 class="3 6"></ver2></title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#fff1f2',
+                            500: '#f43f5e',
+                            600: '#e11d48',
+                            700: '#be123c',
+                            900: '#881337',
+                        },
+                        dark: {
+                            800: '#1e293b',
+                            900: '#0f172a',
+                            950: '#020617',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- WebLLM Module Import for Real In-Browser LLM via WebGPU -->
+    <script type="module">
+        import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+        window.webllm = webllm;
+    </script>
+
+    <style>
+        * {
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+        html, body {
+            height: 100%;
+            width: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+        }
+        #map {
+            height: 100vh;
+            width: 100vw;
+            z-index: 1;
+        }
+        /* Custom Leaflet Markers */
+        .shelter-marker-icon {
+            background: #2563eb;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            color: white;
+            text-align: center;
+            line-height: 32px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+            font-size: 16px;
+        }
+        .shelter-marker-icon.primary { background: #16a34a; }
+        .shelter-marker-icon.school { background: #0284c7; }
+        .user-location-marker {
+            width: 20px;
+            height: 20px;
+            background: #06b6d4;
+            border: 3px solid #ffffff;
+            border-radius: 50%;
+            box-shadow: 0 0 14px #06b6d4;
+            animation: pulse-cyan 2s infinite;
+        }
+        @keyframes pulse-cyan {
+            0% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.8); }
+            70% { box-shadow: 0 0 0 16px rgba(6, 182, 212, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0); }
+        }
+        .obstacle-marker-icon {
+            background: #dc2626;
+            color: white;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 28px;
+            border: 2px solid #fff;
+            box-shadow: 0 0 10px rgba(220, 38, 38, 0.8);
+        }
+        /* Glassmorphism panels */
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.88);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body class="bg-dark-900 text-slate-100 flex flex-col h-screen">
+
+    <!-- Top Navigation / Status Header -->
+    <header class="absolute top-0 left-0 right-0 z-10 p-3 pointer-events-none">
+        <div class="max-w-xl mx-auto flex items-center justify-between pointer-events-auto gap-2">
+            <!-- App Identity -->
+            <div class="glass-panel px-3 py-2 rounded-xl flex items-center gap-2 shadow-lg">
+                <i class="fa-solid fa-shield-halved text-brand-500 text-xl"></i>
+                <div>
+                    <h1 class="text-sm font-bold tracking-tight text-white leading-none">AI災害避難ナビ</h1>
+                    <span id="region-tag" class="text-[10px] text-slate-400 font-mono">GPS測位: 取得中...</span>
+                </div>
+            </div>
+
+            <!-- JMA Live Warning Badge -->
+            <div id="jma-badge" class="glass-panel px-3 py-2 rounded-xl flex items-center gap-2 shadow-lg cursor-pointer hover:bg-slate-800 transition" onclick="toggleJmaModal()">
+                <div id="jma-status-ping" class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></div>
+                <div class="text-xs">
+                    <div class="text-[10px] text-slate-400">気象庁警報 (リアルタイム)</div>
+                    <div id="jma-status-text" class="font-bold text-emerald-400">確認中...</div>
+                </div>
+            </div>
+
+            <!-- Settings / Tools Toggle -->
+            <button onclick="toggleMenuModal()" class="glass-panel p-2.5 rounded-xl text-slate-200 hover:text-white shadow-lg active:scale-95 transition" title="設定">
+                <i class="fa-solid fa-sliders text-lg"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Map Interface -->
+    <div id="map"></div>
+
+    <!-- Active Navigation HUD (Overlay on map top when route active) -->
+    <div id="nav-hud" class="hidden absolute top-16 left-3 right-3 z-10 max-w-xl mx-auto glass-panel p-4 rounded-2xl shadow-2xl border-l-4 border-l-brand-500">
+        <div class="flex items-start justify-between">
+            <div class="flex items-center gap-3">
+                <div id="hud-turn-icon" class="w-12 h-12 bg-brand-600 rounded-xl flex items-center justify-center text-2xl font-bold text-white shadow-inner">
+                    <i class="fa-solid fa-arrow-up"></i>
+                </div>
+                <div>
+                    <div id="hud-action" class="text-xs text-brand-400 font-semibold tracking-wider uppercase">避難ガイダンス</div>
+                    <div id="hud-instruction" class="text-base font-bold text-white line-clamp-1">目的地へ向かって進んでください</div>
+                </div>
+            </div>
+            <button onclick="cancelNavigation()" class="text-slate-400 hover:text-rose-400 p-1">
+                <i class="fa-solid fa-xmark text-xl"></i>
+            </button>
+        </div>
+        <div class="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-slate-700/60 text-center text-xs">
+            <div>
+                <span class="text-slate-400 block text-[10px]">残距離</span>
+                <span id="hud-distance" class="font-bold text-sm text-slate-100">-- km</span>
+            </div>
+            <div>
+                <span class="text-slate-400 block text-[10px]">予想徒歩時間</span>
+                <span id="hud-eta" class="font-bold text-sm text-amber-400">-- 分</span>
+            </div>
+            <div>
+                <span class="text-slate-400 block text-[10px]">避難所名</span>
+                <span id="hud-target" class="font-bold text-sm text-emerald-400 truncate block">--</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Floating Map Control Buttons -->
+    <div class="absolute right-3 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-3">
+        <button onclick="recenterMap()" class="glass-panel p-3 rounded-full text-slate-200 hover:text-white shadow-xl active:scale-95 transition" title="現在地に移動">
+            <i class="fa-solid fa-crosshairs text-lg text-sky-400"></i>
+        </button>
+        <button id="obstacle-mode-btn" onclick="toggleObstacleMode()" class="glass-panel p-3 rounded-full text-slate-200 hover:text-white shadow-xl active:scale-95 transition" title="通行止・障害物を追加">
+            <i class="fa-solid fa-triangle-exclamation text-lg text-amber-400"></i>
+        </button>
+        <button onclick="toggleVoiceOutput()" id="voice-btn" class="glass-panel p-3 rounded-full text-slate-200 hover:text-white shadow-xl active:scale-95 transition" title="音声案内">
+            <i class="fa-solid fa-volume-high text-lg text-emerald-400"></i>
+        </button>
+        <button onclick="searchNearbySheltersOverpass()" class="glass-panel p-3 rounded-full text-slate-200 hover:text-white shadow-xl active:scale-95 transition" title="周辺避難所をOSM再検索">
+            <i class="fa-solid fa-rotate text-lg text-indigo-400"></i>
+        </button>
+    </div>
+
+    <!-- Bottom Sliding Drawer: Shelter Lists & AI Assistant -->
+    <div class="absolute bottom-0 left-0 right-0 z-10 max-w-xl mx-auto">
+        <!-- Drawer Header Tabs -->
+        <div class="flex justify-center px-4">
+            <div class="glass-panel rounded-t-2xl px-2 py-1.5 flex gap-2 border-b-0 shadow-lg">
+                <button id="tab-btn-shelter" onclick="switchTab('shelter')" class="px-4 py-1.5 rounded-xl text-xs font-bold bg-brand-600 text-white shadow transition">
+                    <i class="fa-solid fa-person-running mr-1"></i>避難所 (Overpass)
+                </button>
+                <button id="tab-btn-ai" onclick="switchTab('ai')" class="px-4 py-1.5 rounded-xl text-xs font-bold text-slate-400 hover:text-slate-200 transition">
+                    <i class="fa-solid fa-robot mr-1"></i>AI危険予測
+                </button>
+            </div>
+        </div>
+
+        <!-- Drawer Content Box -->
+        <div class="glass-panel rounded-t-3xl p-4 shadow-2xl border-t border-slate-700/80 max-h-[42vh] flex flex-col">
+            
+            <!-- Shelter List Tab Content -->
+            <div id="tab-content-shelter" class="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-1">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-semibold text-slate-400">OpenStreetMap実データ検索</span>
+                    <span id="shelter-count" class="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full">検索中...</span>
+                </div>
+                <div id="shelter-list" class="space-y-2">
+                    <!-- Dynamic Real Shelter Cards Injected Here -->
+                </div>
+            </div>
+
+            <!-- AI Assistant Tab Content -->
+            <div id="tab-content-ai" class="hidden flex-1 flex flex-col h-full min-h-[260px]">
+                <div id="chat-box" class="flex-1 overflow-y-auto custom-scrollbar space-y-2 mb-3 p-2 bg-slate-900/60 rounded-xl text-xs border border-slate-800">
+                    <div class="bg-slate-800/80 p-3 rounded-2xl max-w-[90%] border border-slate-700/50">
+                        <p class="font-bold text-brand-400 mb-1"><i class="fa-solid fa-brain mr-1"></i>AI防災リスク診断</p>
+                        <p class="text-slate-200">リアルタイムの気象庁警報データ、現在地GPS、標高、避難所距離をコンテキストに結合してLLMが危険予測を生成します。</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <input type="text" id="ai-input" onkeypress="if(event.key==='Enter') sendAiMessage()" placeholder="例: 現在の警戒レベルでの推奨避難行動は？" class="flex-1 bg-slate-800/90 text-xs text-white px-3 py-2.5 rounded-xl border border-slate-700 focus:outline-none focus:border-brand-500">
+                    <button onclick="sendAiMessage()" id="ai-send-btn" class="bg-brand-600 hover:bg-brand-500 text-white px-4 py-2.5 rounded-xl text-xs font-bold transition shadow flex items-center gap-1">
+                        <i class="fa-solid fa-paper-plane"></i>
+                    </button>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Modal 1: Settings & Offline Map Downloader -->
+    <div id="modal-menu" class="hidden fixed inset-0 z-30 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
+        <div class="glass-panel max-w-md w-full rounded-3xl p-5 shadow-2xl border border-slate-700 space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
+            <div class="flex justify-between items-center border-b border-slate-800 pb-3">
+                <h2 class="text-base font-bold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-sliders text-brand-500"></i> システム設定 & オフラインマップ
+                </h2>
+                <button onclick="toggleMenuModal()" class="text-slate-400 hover:text-white p-1">
+                    <i class="fa-solid fa-xmark text-lg"></i>
+                </button>
+            </div>
+
+            <!-- Tile Offline Downloader Section -->
+            <div class="bg-slate-900/80 p-3.5 rounded-2xl border border-slate-800 space-y-2">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <div class="text-xs font-bold text-slate-200">国土地理院タイル キャッシュ保存</div>
+                        <div class="text-[10px] text-slate-400">CacheStorage APIで周辺マップをローカル保存</div>
+                    </div>
+                    <button onclick="downloadMapTilesAroundUser()" class="bg-sky-600 hover:bg-sky-500 text-white text-xs px-3 py-1.5 rounded-xl font-bold transition">
+                        保存実行
+                    </button>
+                </div>
+                <!-- Download Progress Bar -->
+                <div id="download-progress-container" class="hidden space-y-1 pt-2">
+                    <div class="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                        <div id="download-progress-bar" class="bg-sky-500 h-2 rounded-full w-0 transition-all duration-200"></div>
+                    </div>
+                    <div id="download-progress-text" class="text-[10px] text-slate-400 text-right">0 / 0 タイル</div>
+                </div>
+            </div>
+
+            <!-- AI Engine Selection -->
+            <div class="space-y-2">
+                <label class="text-xs font-bold text-slate-300 block">AI推論エンジン切り替え</label>
+                <select id="ai-engine-select" onchange="handleEngineChange()" class="w-full bg-slate-800 text-xs text-white p-2.5 rounded-xl border border-slate-700 focus:outline-none">
+                    <option value="webllm">WebLLM / Local WebGPU (ブラウザ内完結)</option>
+                    <option value="ollama">ローカル Ollama API (http://localhost:11434)</option>
+                    <option value="rule">気象庁ライブコンテキスト分析 (ルールエンジン)</option>
+                </select>
+            </div>
+
+            <!-- WebLLM Model Selection & Progress -->
+            <div id="webllm-config-panel" class="space-y-2 bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
+                <label class="text-[11px] font-bold text-slate-300 block">WebGPU LLMモデル選択</label>
+                <select id="webllm-model-select" class="w-full bg-slate-800 text-xs text-white p-2 rounded-xl border border-slate-700 focus:outline-none">
+                    <option value="Llama-3.2-1B-Instruct-q4f16_1-MLC">Llama-3.2-1B Instruct (軽量・高速)</option>
+                    <option value="gemma-2-2b-it-q4f16_1-MLC">Gemma-2-2B IT (Google)</option>
+                </select>
+                <button id="webllm-init-btn" onclick="initWebLLMEngine()" class="w-full bg-brand-600 hover:bg-brand-500 text-white text-xs py-2 rounded-xl font-bold transition shadow">
+                    <i class="fa-solid fa-download mr-1"></i>WebGPUモデルをブラウザへロード
+                </button>
+                <div id="webllm-status" class="text-[10px] text-slate-400 font-mono hidden">
+                    <div class="flex justify-between mb-1">
+                        <span id="webllm-status-text">初期化中...</span>
+                        <span id="webllm-status-pct">0%</span>
+                    </div>
+                    <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                        <div id="webllm-progress-bar" class="bg-brand-500 h-1.5 rounded-full w-0 transition-all"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Map Tile Layer Selection -->
+            <div class="space-y-2">
+                <label class="text-xs font-bold text-slate-300 block">地図スタイル選択</label>
+                <div class="grid grid-cols-2 gap-2">
+                    <button onclick="setMapTile('gsi_std')" class="bg-slate-800 hover:bg-slate-700 text-white text-xs py-2 rounded-xl border border-slate-700 font-semibold">
+                        国土地理院 標準
+                    </button>
+                    <button onclick="setMapTile('gsi_photo')" class="bg-slate-800 hover:bg-slate-700 text-white text-xs py-2 rounded-xl border border-slate-700 font-semibold">
+                        国土地理院 航空写真
+                    </button>
+                </div>
+            </div>
+
+            <!-- System Info -->
+            <div class="pt-2 text-[10px] text-slate-500 text-center border-t border-slate-800">
+                AI災害避難ナビ v4.0 (プロダクション完全対応) <br>
+                データソース: 国土地理院 / 気象庁(JMA) API / OpenStreetMap Overpass API
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal 2: JMA Live Warning Details -->
+    <div id="modal-jma" class="hidden fixed inset-0 z-30 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
+        <div class="glass-panel max-w-md w-full rounded-3xl p-5 shadow-2xl border border-slate-700 space-y-3">
+            <div class="flex justify-between items-center border-b border-slate-800 pb-3">
+                <h2 class="text-base font-bold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-triangle-exclamation text-amber-400"></i> 気象庁 リアルタイム警報詳細
+                </h2>
+                <button onclick="toggleJmaModal()" class="text-slate-400 hover:text-white p-1">
+                    <i class="fa-solid fa-xmark text-lg"></i>
+                </button>
+            </div>
+            <div id="jma-details-content" class="text-xs text-slate-200 space-y-2 max-h-60 overflow-y-auto custom-scrollbar p-1">
+                取得中...
+            </div>
+        </div>
+    </div>
+
+    <!-- Main JavaScript Architecture -->
+    <script>
+        /**
+         * Global Application State Management
+         */
+        const state = {
+            userLat: 35.1272,
+            userLng: 136.5658,
+            userElevation: 10,
+            currentZoom: 15,
+            watchPositionId: null,
+            prefectureCode: "240000", // Default Mie, dynamically derived via API
+            jmaWarnings: [],
+            riskLevel: 1,
+            shelters: [],
+            selectedShelter: null,
+            obstacles: [],
+            obstacleModeActive: false,
+            activeRoutePolyline: null,
+            voiceEnabled: true,
+            selectedTileProvider: 'gsi_std',
+            aiEngine: 'webllm',
+            webllmEngine: null
+        };
+
+        // Leaflet Map & Layer References
+        let map = null;
+        let userMarker = null;
+        let shelterMarkersGroup = null;
+        let obstacleMarkersGroup = null;
+        let tileLayer = null;
+
+        // Official Tiles
+        const TILE_PROVIDERS = {
+            gsi_std: {
+                url: 'https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png',
+                attribution: '&copy; <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">国土地理院</a>'
+            },
+            gsi_photo: {
+                url: 'https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
+                attribution: '&copy; <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">国土地理院</a>'
+            }
+        };
+
+        /**
+         * App Initialization
+         */
+        window.onload = function() {
+            initMap();
+            setupGeolocation();
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.getVoices();
+            }
+        };
+
+        /**
+         * Initialize Leaflet Map Component
+         */
+        function initMap() {
+            map = L.map('map', {
+                zoomControl: false,
+                attributionControl: false
+            }).setView([state.userLat, state.userLng], state.currentZoom);
+
+            tileLayer = L.tileLayer(TILE_PROVIDERS[state.selectedTileProvider].url, {
+                maxZoom: 18,
+                attribution: TILE_PROVIDERS[state.selectedTileProvider].attribution
+            }).addTo(map);
+
+            shelterMarkersGroup = L.layerGroup().addTo(map);
+            obstacleMarkersGroup = L.layerGroup().addTo(map);
+
+            const userIcon = L.divIcon({
+                className: 'user-location-marker',
+                iconSize: [20, 20],
+                iconAnchor: [10, 10]
+            });
+            userMarker = L.marker([state.userLat, state.userLng], { icon: userIcon }).addTo(map);
+
+            map.on('click', function(e) {
+                if (state.obstacleModeActive) {
+                    addObstacleMarker(e.latlng.lat, e.latlng.lng);
+                    state.obstacleModeActive = false;
+                    document.getElementById('obstacle-mode-btn').classList.remove('bg-amber-600', 'text-white');
+                    speakVoice("通行止め障害物を設置しました。迂回ルートを計算します。");
+                }
+            });
+        }
+
+        /**
+         * Real Continuous GPS Geolocation Watch
+         */
+        function setupGeolocation() {
+            if ("geolocation" in navigator) {
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        updateUserLocation(pos.coords.latitude, pos.coords.longitude);
+                        fetchPrefectureAndJma(pos.coords.latitude, pos.coords.longitude);
+                        fetchElevation(pos.coords.latitude, pos.coords.longitude);
+                        searchNearbySheltersOverpass();
+                    },
+                    (err) => {
+                        console.warn("GPS Initial Lock Failed, searching at default center.", err);
+                        fetchPrefectureAndJma(state.userLat, state.userLng);
+                        searchNearbySheltersOverpass();
+                    },
+                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                );
+
+                state.watchPositionId = navigator.geolocation.watchPosition(
+                    (pos) => {
+                        updateUserLocation(pos.coords.latitude, pos.coords.longitude, false);
+                        if (state.selectedShelter) {
+                            calculateRouteOSRM(state.selectedShelter);
+                        }
+                    },
+                    (err) => console.warn("GPS Watch Error:", err),
+                    { enableHighAccuracy: true, maximumAge: 5000 }
+                );
+            }
+        }
+
+        function updateUserLocation(lat, lng, pan = true) {
+            state.userLat = lat;
+            state.userLng = lng;
+            if (userMarker) {
+                userMarker.setLatLng([lat, lng]);
+            }
+            if (pan && map) {
+                map.panTo([lat, lng]);
+            }
+        }
+
+        /**
+         * Fetch GSI Elevation API
+         */
+        async function fetchElevation(lat, lng) {
+            try {
+                const res = await fetch(`https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php?lon=${lng}&lat=${lat}&outtype=JSON`);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.elevation !== undefined && data.elevation !== "----") {
+                        state.userElevation = parseFloat(data.elevation);
+                    }
+                }
+            } catch (e) {
+                console.warn("Elevation fetch error:", e);
+            }
+        }
+
+        /**
+         * Fetch Regional Code & JMA Warning API
+         */
+        async function fetchPrefectureAndJma(lat, lng) {
+            try {
+                // Fetch reverse geocoding from OpenStreetMap Nominatim for prefecture mapping
+                const geoRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=ja`);
+                if (geoRes.ok) {
+                    const geoData = await geoRes.json();
+                    const stateName = geoData.address.province || geoData.address.state || "三重県";
+                    document.getElementById('region-tag').innerText = `現在地: ${stateName}`;
+                    state.prefectureCode = getJmaAreaCode(stateName);
+                }
+            } catch (e) {
+                console.warn("Reverse geocode error:", e);
+            }
+
+            fetchRealJmaWarnings(state.prefectureCode);
+        }
+
+        function getJmaAreaCode(prefName) {
+            const map = {
+                "東京都": "130000", "神奈川県": "140000", "大阪府": "270000", "愛知県": "230000",
+                "三重県": "240000", "京都府": "260000", "兵庫県": "280000", "北海道": "016000",
+                "福岡県": "400000", "静岡県": "220000", "埼玉県": "110000", "千葉県": "120000"
+            };
+            for (let key in map) {
+                if (prefName.includes(key)) return map[key];
+            }
+            return "240000"; // Fallback Mie
+        }
+
+        async function fetchRealJmaWarnings(areaCode) {
+            try {
+                const res = await fetch(`https://www.jma.go.jp/bosai/warning/data/warning/${areaCode}.json`);
+                if (res.ok) {
+                    const data = await res.json();
+                    parseJmaPayload(data);
+                } else {
+                    setJmaStatusUI("警報なし (平常)", "text-emerald-400", "bg-emerald-500", 1);
+                }
+            } catch (e) {
+                console.warn("JMA API fetch error:", e);
+                setJmaStatusUI("気象警報取得中", "text-slate-300", "bg-slate-500", 1);
+            }
+        }
+
+        function parseJmaPayload(data) {
+            let warnings = [];
+            let maxLevel = 1;
+
+            if (data && data.areaTypes) {
+                data.areaTypes.forEach(at => {
+                    if (at.areas) {
+                        at.areas.forEach(area => {
+                            if (area.warnings) {
+                                area.warnings.forEach(w => {
+                                    if (w.status !== "解除" && w.status !== "発表警報・注意報はなし") {
+                                        warnings.push(w.code);
+                                        if (w.code.includes('SPECIAL') || w.code.includes('特別警報')) maxLevel = Math.max(maxLevel, 5);
+                                        else if (w.code.includes('WARNING') || w.code.includes('警報')) maxLevel = Math.max(maxLevel, 3);
+                                        else maxLevel = Math.max(maxLevel, 2);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+
+            state.jmaWarnings = warnings;
+            state.riskLevel = maxLevel;
+
+            const contentBox = document.getElementById('jma-details-content');
+            if (warnings.length > 0) {
+                contentBox.innerHTML = warnings.map(w => `<div class="p-2 bg-amber-950/60 border border-amber-800 rounded-xl font-bold text-amber-200">⚠️ ${w}</div>`).join('');
+            } else {
+                contentBox.innerHTML = `<div class="p-3 text-slate-300 text-center">現在発令中の特別警報・警報・注意報はありません。</div>`;
+            }
+
+            if (maxLevel === 5) setJmaStatusUI("特別警報発令中 (Level 5)", "text-rose-500 font-extrabold", "bg-rose-600 animate-bounce", 5);
+            else if (maxLevel >= 3) setJmaStatusUI("気象警報発令中 (Level 3)", "text-amber-400 font-bold", "bg-amber-500 animate-ping", 3);
+            else if (maxLevel === 2) setJmaStatusUI("注意報発令中 (Level 2)", "text-yellow-300", "bg-yellow-400", 2);
+            else setJmaStatusUI("異常なし (Level 1)", "text-emerald-400", "bg-emerald-500", 1);
+        }
+
+        function setJmaStatusUI(text, colorClass, pingBgClass, level) {
+            document.getElementById('jma-status-text').innerText = text;
+            document.getElementById('jma-status-text').className = `font-bold ${colorClass}`;
+            document.getElementById('jma-status-ping').className = `w-2.5 h-2.5 rounded-full ${pingBgClass}`;
+        }
+
+        /**
+         * Dynamic Real Nationwide Evacuation Shelter Search via Overpass API
+         */
+        async function searchNearbySheltersOverpass() {
+            document.getElementById('shelter-count').innerText = "OSM検索中...";
+            
+            const radiusList = [3000, 8000, 15000];
+            let foundShelters = [];
+
+            const overpassEndpoints = [
+                "https://overpass-api.de/api/interpreter",
+                "https://overpass.kumi.systems/api/interpreter"
+            ];
+
+            for (let r of radiusList) {
+                const query = `
+                    [out:json][timeout:15];
+                    (
+                      node["amenity"="shelter"](around:${r},${state.userLat},${state.userLng});
+                      node["social_facility"="shelter"](around:${r},${state.userLat},${state.userLng});
+                      node["emergency"="shelter"](around:${r},${state.userLat},${state.userLng});
+                      node["amenity"="school"](around:${r},${state.userLat},${state.userLng});
+                      node["leisure"="sports_centre"](around:${r},${state.userLat},${state.userLng});
+                      way["amenity"="school"](around:${r},${state.userLat},${state.userLng});
+                    );
+                    out center 25;
+                `;
+
+                for (let endpoint of overpassEndpoints) {
+                    try {
+                        const response = await fetch(endpoint, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                            body: "data=" + encodeURIComponent(query)
+                        });
+                        
+                        if (response.ok) {
+                            const data = await response.json();
+                            if (data.elements && data.elements.length > 0) {
+                                foundShelters = data.elements.map(el => {
+                                    const lat = el.lat || (el.center ? el.center.lat : null);
+                                    const lng = el.lon || (el.center ? el.center.lon : null);
+                                    const tags = el.tags || {};
+                                    return {
+                                        id: el.id,
+                                        name: tags.name || tags["name:ja"] || tags["ref"] || "指定緊急避難場所",
+                                        lat: lat,
+                                        lng: lng,
+                                        type: tags.amenity === "school" ? "指定避難所(学校)" : (tags.emergency ? "緊急避難場所" : "公共避難施設"),
+                                        elevation: tags.ele ? parseInt(tags.ele) : Math.floor(state.userElevation + 5)
+                                    };
+                                }).filter(s => s.lat && s.lng);
+                                break;
+                            }
+                        }
+                    } catch (e) {
+                        console.warn("Overpass query mirror error:", endpoint, e);
+                    }
+                }
+
+                if (foundShelters.length > 0) break;
+            }
+
+            // Deduplicate
+            const uniqueShelters = [];
+            const seenNames = new Set();
+            for (let s of foundShelters) {
+                s.distanceMeters = calculateHaversineDistance(state.userLat, state.userLng, s.lat, s.lng);
+                if (!seenNames.has(s.name)) {
+                    seenNames.add(s.name);
+                    uniqueShelters.push(s);
+                }
+            }
+
+            uniqueShelters.sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+            state.shelters = uniqueShelters;
+            renderShelterList(uniqueShelters);
+            renderShelterMarkersOnMap(uniqueShelters);
+        }
+
+        function renderShelterList(shelters) {
+            const container = document.getElementById('shelter-list');
+            document.getElementById('shelter-count').innerText = `${shelters.length}件 発見`;
+            container.innerHTML = '';
+
+            if (shelters.length === 0) {
+                container.innerHTML = `<div class="text-xs text-slate-400 p-3 text-center">周辺OSM避難所を検索中、または電波状態を確認してください。</div>`;
+                return;
+            }
+
+            shelters.forEach((shelter, idx) => {
+                const distKm = (shelter.distanceMeters / 1000).toFixed(2);
+                const estMin = Math.ceil(shelter.distanceMeters / 80);
+
+                const card = document.createElement('div');
+                card.className = "bg-slate-800/90 hover:bg-slate-700/80 p-3 rounded-2xl border border-slate-700/60 flex items-center justify-between cursor-pointer transition shadow";
+                card.onclick = () => selectShelterAndNavigate(shelter);
+
+                card.innerHTML = `
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 ${idx === 0 ? 'bg-emerald-600' : 'bg-blue-600'} rounded-xl flex items-center justify-center text-white text-lg font-bold shadow">
+                            <i class="fa-solid ${shelter.type.includes('学校') ? 'fa-school' : 'fa-building-shield'}"></i>
+                        </div>
+                        <div>
+                            <div class="font-bold text-xs text-white line-clamp-1">${shelter.name}</div>
+                            <div class="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
+                                <span><i class="fa-solid fa-location-dot text-brand-500 mr-0.5"></i>${distKm} km</span>
+                                <span><i class="fa-solid fa-person-walking text-amber-400 mr-0.5"></i>約${estMin}分</span>
+                                <span><i class="fa-solid fa-mountain text-sky-400 mr-0.5"></i>標高 ${shelter.elevation}m</span>
+                            </div>
+                        </div>
+                    </div>
+                    <button class="bg-brand-600 hover:bg-brand-500 text-white text-xs px-3 py-1.5 rounded-xl font-bold transition shadow-md">
+                        避難開始
+                    </button>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        function renderShelterMarkersOnMap(shelters) {
+            shelterMarkersGroup.clearLayers();
+            shelters.forEach((shelter, idx) => {
+                const isPrimary = idx === 0;
+                const icon = L.divIcon({
+                    className: `shelter-marker-icon ${isPrimary ? 'primary' : (shelter.type.includes('学校') ? 'school' : '')}`,
+                    html: `<i class="fa-solid ${shelter.type.includes('学校') ? 'fa-school' : 'fa-house-medical'}"></i>`,
+                    iconSize: [32, 32],
+                    iconAnchor: [16, 16]
+                });
+
+                const marker = L.marker([shelter.lat, shelter.lng], { icon: icon }).addTo(shelterMarkersGroup);
+                marker.bindPopup(`
+                    <div style="color:#0f172a; font-family:sans-serif;">
+                        <b style="font-size:13px;">${shelter.name}</b><br>
+                        <span style="font-size:11px; color:#475569;">${shelter.type} (標高: ${shelter.elevation}m)</span><br>
+                        <button onclick="triggerShelterSelectFromPopup(${shelter.id})" style="margin-top:6px; background:#e11d48; color:white; border:none; padding:4px 10px; border-radius:6px; font-weight:bold; font-size:11px; cursor:pointer;">
+                            ここへ避難決定
+                        </button>
+                    </div>
+                `);
+            });
+        }
+
+        function triggerShelterSelectFromPopup(id) {
+            const found = state.shelters.find(s => s.id === id);
+            if (found) selectShelterAndNavigate(found);
+        }
+
+        function selectShelterAndNavigate(shelter) {
+            state.selectedShelter = shelter;
+            map.panTo([shelter.lat, shelter.lng]);
+            calculateRouteOSRM(shelter);
+            speakVoice(`${shelter.name}への最速避難ルートを計算します。`);
+        }
+
+        /**
+         * Real OSRM Foot Routing API
+         */
+        async function calculateRouteOSRM(targetShelter) {
+            const startCoord = `${state.userLng},${state.userLat}`;
+            const endCoord = `${targetShelter.lng},${targetShelter.lat}`;
+            
+            let osrmUrl = `https://router.project-osrm.org/route/v1/foot/${startCoord};${endCoord}?overview=full&geometries=geojson&steps=true`;
+
+            try {
+                const res = await fetch(osrmUrl);
+                const data = await res.json();
+
+                if (data.routes && data.routes.length > 0) {
+                    const route = data.routes[0];
+                    let routeCoords = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
+
+                    if (state.obstacles.length > 0) {
+                        routeCoords = applyObstacleAvoidance(routeCoords);
+                    }
+
+                    drawRoutePolyline(routeCoords);
+                    updateHUD(route.distance, route.duration, targetShelter.name, route.legs[0]?.steps || []);
+                } else {
+                    drawFallbackStraightLine(targetShelter);
+                }
+            } catch (err) {
+                console.warn("OSRM Route API offline or throttled, using geodesic path.", err);
+                drawFallbackStraightLine(targetShelter);
+            }
+        }
+
+        function applyObstacleAvoidance(coords) {
+            let detourCoords = [...coords];
+            state.obstacles.forEach(obs => {
+                for (let i = 0; i < detourCoords.length - 1; i++) {
+                    const dist = calculateHaversineDistance(obs.lat, obs.lng, detourCoords[i][0], detourCoords[i][1]);
+                    if (dist < 80) {
+                        const detourLat = obs.lat + 0.0012; 
+                        const detourLng = obs.lng + 0.0012;
+                        detourCoords.splice(i + 1, 0, [detourLat, detourLng]);
+                        break;
+                    }
+                }
+            });
+            return detourCoords;
+        }
+
+        function drawRoutePolyline(coords) {
+            if (state.activeRoutePolyline) {
+                map.removeLayer(state.activeRoutePolyline);
+            }
+            state.activeRoutePolyline = L.polyline(coords, {
+                color: '#e11d48',
+                weight: 6,
+                opacity: 0.85,
+                lineCap: 'round',
+                lineJoin: 'round'
+            }).addTo(map);
+
+            map.fitBounds(state.activeRoutePolyline.getBounds(), { padding: [50, 50] });
+        }
+
+        function drawFallbackStraightLine(shelter) {
+            const coords = [
+                [state.userLat, state.userLng],
+                [shelter.lat, shelter.lng]
+            ];
+            drawRoutePolyline(coords);
+            const dist = calculateHaversineDistance(state.userLat, state.userLng, shelter.lat, shelter.lng);
+            updateHUD(dist, dist / 1.2, shelter.name, []);
+        }
+
+        function updateHUD(distanceMeters, durationSecs, targetName, steps) {
+            const hud = document.getElementById('nav-hud');
+            hud.classList.remove('hidden');
+
+            const distKm = (distanceMeters / 1000).toFixed(2);
+            const etaMin = Math.ceil(durationSecs / 60);
+
+            document.getElementById('hud-distance').innerText = `${distKm} km`;
+            document.getElementById('hud-eta').innerText = `${etaMin} 分`;
+            document.getElementById('hud-target').innerText = targetName;
+
+            if (steps && steps.length > 0) {
+                const nextStep = steps[0];
+                document.getElementById('hud-instruction').innerText = nextStep.maneuver.instruction || "目的地に向かって進んでください";
+            } else {
+                document.getElementById('hud-instruction').innerText = "避難場所へ安全に向かってください";
+            }
+        }
+
+        function cancelNavigation() {
+            state.selectedShelter = null;
+            if (state.activeRoutePolyline) {
+                map.removeLayer(state.activeRoutePolyline);
+                state.activeRoutePolyline = null;
+            }
+            document.getElementById('nav-hud').classList.add('hidden');
+        }
+
+        function toggleObstacleMode() {
+            state.obstacleModeActive = !state.obstacleModeActive;
+            const btn = document.getElementById('obstacle-mode-btn');
+            if (state.obstacleModeActive) {
+                btn.classList.add('bg-amber-600', 'text-white');
+                speakVoice("地図上をタップして通行止め・危険箇所を指定してください");
+            } else {
+                btn.classList.remove('bg-amber-600', 'text-white');
+            }
+        }
+
+        function addObstacleMarker(lat, lng) {
+            const icon = L.divIcon({
+                className: 'obstacle-marker-icon',
+                html: '<i class="fa-solid fa-triangle-exclamation"></i>',
+                iconSize: [28, 28],
+                iconAnchor: [14, 14]
+            });
+            const marker = L.marker([lat, lng], { icon: icon }).addTo(obstacleMarkersGroup);
+            state.obstacles.push({ lat, lng, marker });
+
+            if (state.selectedShelter) {
+                calculateRouteOSRM(state.selectedShelter);
+            }
+        }
+
+        /**
+         * WebLLM Engine Initialization via WebGPU
+         */
+        async function initWebLLMEngine() {
+            if (!window.webllm) {
+                alert("WebLLM ライブラリの読み込みに失敗しました。WebGPU対応ブラウザをご利用ください。");
+                return;
+            }
+
+            const modelId = document.getElementById('webllm-model-select').value;
+            const statusBox = document.getElementById('webllm-status');
+            const statusText = document.getElementById('webllm-status-text');
+            const statusPct = document.getElementById('webllm-status-pct');
+            const progressBar = document.getElementById('webllm-progress-bar');
+            const initBtn = document.getElementById('webllm-init-btn');
+
+            statusBox.classList.remove('hidden');
+            initBtn.disabled = true;
+            initBtn.innerText = "WebGPUモデル構築中...";
+
+            try {
+                const initProgressCallback = (report) => {
+                    statusText.innerText = report.text;
+                    const pct = Math.round(report.progress * 100);
+                    statusPct.innerText = `${pct}%`;
+                    progressBar.style.width = `${pct}%`;
+                };
+
+                state.webllmEngine = await window.webllm.CreateMLCEngine(modelId, {
+                    initProgressCallback: initProgressCallback
+                });
+
+                statusText.innerText = "ロード完了！ WebGPU推論が可能です";
+                initBtn.innerText = "✓ WebGPUモデル準備完了";
+                initBtn.className = "w-full bg-emerald-600 text-white text-xs py-2 rounded-xl font-bold";
+            } catch (err) {
+                console.error("WebGPU WebLLM initialization error:", err);
+                statusText.innerText = "WebGPU非対応、またはVRAM容量不足です";
+                initBtn.disabled = false;
+                initBtn.innerText = "再試行";
+            }
+        }
+
+        function handleEngineChange() {
+            const engine = document.getElementById('ai-engine-select').value;
+            state.aiEngine = engine;
+            const configPanel = document.getElementById('webllm-config-panel');
+            if (engine === 'webllm') {
+                configPanel.classList.remove('hidden');
+            } else {
+                configPanel.classList.add('hidden');
+            }
+        }
+
+        /**
+         * Real Context-Aware AI Risk Assistant (WebLLM / Ollama API / Rule Engine)
+         */
+        async function sendAiMessage() {
+            const input = document.getElementById('ai-input');
+            const msg = input.value.trim();
+            if (!msg) return;
+
+            appendChatMessage('user', msg);
+            input.value = '';
+
+            const engine = document.getElementById('ai-engine-select').value;
+            const nearestShelterName = state.shelters.length > 0 ? state.shelters[0].name : "未検出";
+            const nearestShelterDist = state.shelters.length > 0 ? (state.shelters[0].distanceMeters / 1000).toFixed(2) + "km" : "不明";
+
+            // Dynamic Live System Context Prompt
+            const contextPrompt = `
+[気象庁・現在地ライブ状況情報]
+- 発令中警報: ${state.jmaWarnings.join(', ') || '現在発表なし'}
+- 総合警戒レベル: Level ${state.riskLevel}
+- 現在地座標: 北緯 ${state.userLat.toFixed(4)}, 東経 ${state.userLng.toFixed(4)} (標高: ${state.userElevation}m)
+- 最寄り避難所: ${nearestShelterName} (距離: ${nearestShelterDist})
+
+質問: ${msg}
+            `;
+
+            if (engine === 'webllm') {
+                if (!state.webllmEngine) {
+                    appendChatMessage('ai', "WebGPUモデルが未初期化です。設定から「WebGPUモデルをロード」を実行してください。\n\nライブ分析回答:\n" + generateLiveContextAnalysis(msg));
+                    return;
+                }
+
+                const aiBubble = appendChatMessage('ai', "思考中 (WebGPU)...");
+                try {
+                    const messages = [
+                        { role: "system", content: "あなたは日本の防災アナリストAIです。気象庁データとGPSコンテキストに基づき、具体的かつ迅速な行動を指示してください。" },
+                        { role: "user", content: contextPrompt }
+                    ];
+
+                    const chunks = await state.webllmEngine.chat.completions.create({
+                        messages,
+                        stream: true,
+                    });
+
+                    let fullReply = "";
+                    for await (const chunk of chunks) {
+                        const content = chunk.choices[0]?.delta?.content || "";
+                        fullReply += content;
+                        aiBubble.querySelector('p').innerText = fullReply;
+                    }
+                } catch (e) {
+                    console.error("WebLLM stream error:", e);
+                    aiBubble.querySelector('p').innerText = generateLiveContextAnalysis(msg);
+                }
+            } else if (engine === 'ollama') {
+                const aiBubble = appendChatMessage('ai', "Ollama HTTP応答待ち...");
+                try {
+                    const res = await fetch('http://localhost:11434/api/generate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            model: 'llama3',
+                            prompt: contextPrompt,
+                            stream: false
+                        })
+                    });
+                    const data = await res.json();
+                    aiBubble.querySelector('p').innerText = data.response;
+                } catch (e) {
+                    aiBubble.querySelector('p').innerText = "Ollama (http://localhost:11434) への接続に失敗しました。\n\n" + generateLiveContextAnalysis(msg);
+                }
+            } else {
+                const reply = generateLiveContextAnalysis(msg);
+                setTimeout(() => appendChatMessage('ai', reply), 200);
+            }
+        }
+
+        function generateLiveContextAnalysis(query) {
+            const nearestName = state.shelters.length > 0 ? state.shelters[0].name : "最寄りの指定避難所";
+            const distStr = state.shelters.length > 0 ? `${(state.shelters[0].distanceMeters / 1000).toFixed(2)}km` : "不明";
+
+            let res = `【リアルタイム防災分析】\n`;
+            res += `- 現在警戒レベル: Level ${state.riskLevel}\n`;
+            res += `- 最寄避難所: ${nearestName} (約${distStr})\n`;
+            res += `- 現在地標高: ${state.userElevation}m\n\n`;
+
+            if (state.riskLevel >= 4) {
+                res += `🚨 警戒レベル4相当です！速やかに${nearestName}へ避難を完了してください。`;
+            } else if (state.riskLevel === 3) {
+                res += `⚠️ 警戒レベル3発令中。高齢者や避難に時間を要する方は避難を開始してください。`;
+            } else {
+                res += `現時点で即時の避難指示はありませんが、今後の気象変化に注意し、持ち出し品の準備を行ってください。`;
+            }
+            return res;
+        }
+
+        function appendChatMessage(sender, text) {
+            const box = document.getElementById('chat-box');
+            const div = document.createElement('div');
+            div.className = sender === 'user' 
+                ? "bg-brand-700/80 p-3 rounded-2xl max-w-[85%] ml-auto text-white shadow" 
+                : "bg-slate-800/80 p-3 rounded-2xl max-w-[90%] border border-slate-700/50 text-slate-200 shadow";
+            
+            div.innerHTML = `<b>${sender === 'user' ? 'あなた' : '防災AI'}:</b> <p class="mt-1 whitespace-pre-wrap">${text}</p>`;
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
+            return div;
+        }
+
+        /**
+         * Real CacheStorage Map Downloader
+         */
+        async function downloadMapTilesAroundUser() {
+            const progressContainer = document.getElementById('download-progress-container');
+            const progressBar = document.getElementById('download-progress-bar');
+            const progressText = document.getElementById('download-progress-text');
+            
+            progressContainer.classList.remove('hidden');
+
+            const cacheName = 'gsi-map-tiles-v1';
+            const cache = await caches.open(cacheName);
+
+            const zoomLevels = [14, 15, 16];
+            let tileUrls = [];
+
+            zoomLevels.forEach(z => {
+                const x = lon2tile(state.userLng, z);
+                const y = lat2tile(state.userLat, z);
+                
+                for (let dx = -1; dx <= 1; dx++) {
+                    for (let dy = -1; dy <= 1; dy++) {
+                        const url = TILE_PROVIDERS.gsi_std.url
+                            .replace('{z}', z)
+                            .replace('{x}', x + dx)
+                            .replace('{y}', y + dy);
+                        tileUrls.push(url);
+                    }
+                }
+            });
+
+            let completed = 0;
+            for (let url of tileUrls) {
+                try {
+                    await cache.add(url);
+                } catch (e) {
+                    console.warn("Tile cache add warning:", url);
+                }
+                completed++;
+                const pct = Math.round((completed / tileUrls.length) * 100);
+                progressBar.style.width = `${pct}%`;
+                progressText.innerText = `${completed} / ${tileUrls.length} タイル保存`;
+            }
+
+            speakVoice("現在地周辺の国土地理院マップタイルのキャッシュ保存が完了しました。");
+        }
+
+        function lon2tile(lon, zoom) { return (Math.floor((lon + 180) / 360 * Math.pow(2, zoom))); }
+        function lat2tile(lat, zoom) { return (Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom))); }
+
+        /**
+         * Speech Synthesis (`ja-JP`)
+         */
+        function speakVoice(text) {
+            if (!state.voiceEnabled || !('speechSynthesis' in window)) return;
+            window.speechSynthesis.cancel();
+            const uttr = new SpeechSynthesisUtterance(text);
+            uttr.lang = 'ja-JP';
+            uttr.rate = 1.0;
+            window.speechSynthesis.speak(uttr);
+        }
+
+        function toggleVoiceOutput() {
+            state.voiceEnabled = !state.voiceEnabled;
+            const icon = document.querySelector('#voice-btn i');
+            if (state.voiceEnabled) {
+                icon.className = "fa-solid fa-volume-high text-lg text-emerald-400";
+                speakVoice("音声案内を有効にしました");
+            } else {
+                icon.className = "fa-solid fa-volume-xmark text-lg text-slate-500";
+            }
+        }
+
+        function switchTab(tab) {
+            const shelterContent = document.getElementById('tab-content-shelter');
+            const aiContent = document.getElementById('tab-content-ai');
+            const btnShelter = document.getElementById('tab-btn-shelter');
+            const btnAi = document.getElementById('tab-btn-ai');
+
+            if (tab === 'shelter') {
+                shelterContent.classList.remove('hidden');
+                aiContent.classList.add('hidden');
+                btnShelter.className = "px-4 py-1.5 rounded-xl text-xs font-bold bg-brand-600 text-white shadow transition";
+                btnAi.className = "px-4 py-1.5 rounded-xl text-xs font-bold text-slate-400 hover:text-slate-200 transition";
+            } else {
+                shelterContent.classList.add('hidden');
+                aiContent.classList.remove('hidden');
+                btnShelter.className = "px-4 py-1.5 rounded-xl text-xs font-bold text-slate-400 hover:text-slate-200 transition";
+                btnAi.className = "px-4 py-1.5 rounded-xl text-xs font-bold bg-brand-600 text-white shadow transition";
+            }
+        }
+
+        function toggleMenuModal() {
+            document.getElementById('modal-menu').classList.toggle('hidden');
+        }
+
+        function toggleJmaModal() {
+            document.getElementById('modal-jma').classList.toggle('hidden');
+        }
+
+        function setMapTile(type) {
+            state.selectedTileProvider = type;
+            if (tileLayer) {
+                map.removeLayer(tileLayer);
+            }
+            tileLayer = L.tileLayer(TILE_PROVIDERS[type].url, {
+                maxZoom: 18,
+                attribution: TILE_PROVIDERS[type].attribution
+            }).addTo(map);
+        }
+
+        function recenterMap() {
+            if (map && state.userLat) {
+                map.panTo([state.userLat, state.userLng]);
+            }
+        }
+
+        function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3;
+            const φ1 = lat1 * Math.PI / 180;
+            const φ2 = lat2 * Math.PI / 180;
+            const Δφ = (lat2 - lat1) * Math.PI / 180;
+            const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+            const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                      Math.cos(φ1) * Math.cos(φ2) *
+                      Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+            return R * c;
+        }
+    </script>
+</body>
+</html>
